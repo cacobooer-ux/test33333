@@ -1,0 +1,225 @@
+name: Ubuntu Tailscale SSH Runner
+
+on:
+  workflow_dispatch:
+    inputs:
+      launch:
+        description: 'Start the runner'
+        required: false
+        default: 'yes'
+
+permissions:
+  contents: write
+
+jobs:
+  ubuntu-ssh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Install OpenSSH server and tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y openssh-server curl git zstd openssl
+      - name: Checkout selected repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          token: ${{ github.token }}
+      - name: Install OpenCode
+        id: install_opencode
+        run: |
+          set -euo pipefail
+          sudo chown -R runner:runner "$HOME/.npm" 2>/dev/null || true
+          mkdir -p "$HOME/.npm"
+          chmod 700 "$HOME/.npm"
+          npm i -g opencode-ai
+          opencode --version
+      - name: Install Hermes Agent
+        run: |
+          set -euo pipefail
+          curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash -s -- \
+            --non-interactive --skip-browser --skip-computer-use
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/hermes" --help >/dev/null
+      - name: Start Hermes Telegram gateway
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_ALLOWED_USERS: ${{ secrets.TELEGRAM_ALLOWED_USERS }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$TELEGRAM_BOT_TOKEN" ]]; then
+            echo 'Telegram gateway not configured; skipping.'
+            exit 0
+          fi
+          [[ "$TELEGRAM_BOT_TOKEN" =~ ^[^[:space:]]+$ ]] || { echo 'Invalid Telegram bot token secret.' >&2; exit 1; }
+          [[ "$TELEGRAM_ALLOWED_USERS" =~ ^[0-9]+(,[0-9]+)*$ ]] || { echo 'Telegram allowed users must be numeric IDs separated by commas.' >&2; exit 1; }
+          install -d -m 700 "$HOME/.hermes"
+          umask 077
+          {
+            printf 'TELEGRAM_BOT_TOKEN=%s\nTELEGRAM_ALLOWED_USERS=%s\n' \
+              "$TELEGRAM_BOT_TOKEN" "$TELEGRAM_ALLOWED_USERS"
+            [[ -n "$OPENROUTER_API_KEY" ]] && printf 'OPENROUTER_API_KEY=%s\n' "$OPENROUTER_API_KEY"
+          } > "$HOME/.hermes/.env"
+          nohup hermes gateway > "$HOME/.hermes/gateway.log" 2>&1 &
+          echo $! > "$HOME/.hermes/gateway.pid"
+          sleep 3
+          if ! kill -0 "$(cat "$HOME/.hermes/gateway.pid")" 2>/dev/null; then
+            echo 'Hermes Telegram gateway did not stay running; configure Hermes with hermes setup over SSH.' >&2
+          else
+            echo 'Hermes Telegram gateway started.'
+          fi
+      - name: Install Hermes provider skills
+        run: |
+          set -euo pipefail
+          install -d -m 700 "$HOME/.hermes/skills/openrouter" "$HOME/.hermes/skills/hermes-cloud"
+          cat > "$HOME/.hermes/skills/openrouter/SKILL.md" <<'SKILL'
+          ---
+          name: openrouter
+          description: Select and use OpenRouter from Telegram when the runner has an OPENROUTER_API_KEY configured.
+          ---
+          # OpenRouter provider
+          When the user invokes `/openrouter`, explain that the OpenRouter API key is already configured from the encrypted runner secret when available. Do not reveal or print the key. Tell the user to send `/model` to open Hermes' model picker, or send `/model openrouter:<provider/model>` to choose a known OpenRouter model. If the provider is not configured or a model switch fails, tell the user to reconnect the runner or use SSH to run `hermes model`.
+          Never echo, inspect, or expose `OPENROUTER_API_KEY`.
+          SKILL
+          cat > "$HOME/.hermes/skills/hermes-cloud/SKILL.md" <<'SKILL'
+          ---
+          name: hermes-cloud
+          description: Explain how to deploy the persistent Hermes Cloud agent without mixing it with the temporary revps gateway.
+          ---
+          # Hermes Cloud
+          When the user invokes `/hermes-cloud` or asks for the persistent Hermes Cloud agent, send this official link: https://portal.nousresearch.com/cloud
+          Explain that Hermes Cloud is a separate always-on agent with persistent memory and its own Telegram integration. The user must deploy or approve it in the browser and configure a separate Telegram bot for Cloud; never claim that this temporary revps runner has been migrated to Cloud. Do not request payment details or handle billing. After Cloud is deployed, advise the user to use the Cloud bot separately so two gateways never consume updates from the same Telegram bot.
+          SKILL
+          chmod 600 "$HOME/.hermes/skills/openrouter/SKILL.md" "$HOME/.hermes/skills/hermes-cloud/SKILL.md"
+          [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]] && hermes gateway restart 2>/dev/null || true
+      - name: Install ntfy notification skill
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.config/opencode/skills/ntfy-notifications"
+          cat > "$HOME/.config/opencode/skills/ntfy-notifications/SKILL.md" <<'SKILL'
+          ---
+          name: ntfy-notifications
+          description: Send a completion notification through ntfy when the user explicitly asks to be notified after finishing work.
+          ---
+
+          # ntfy completion notifications
+
+          Use this skill only when the user explicitly requests a completion notification, including wording such as "notify me when you finish", "notify me when you're done", "send me a notification when finished", or equivalent wording.
+
+          The ntfy topic URL is provided in the `NTFY_URL` environment variable. Never reveal, print, commit, or include this URL in normal responses, logs, code, or status output.
+
+          When the requested work is genuinely complete, send one concise notification with:
+
+          ```bash
+          curl --fail --silent --show-error --max-time 20 \\
+            -H 'Title: OpenCode task finished' \\
+            -H 'Tags: white_check_mark' \\
+            --data-raw 'OpenCode finished the requested task.' \\
+            "$NTFY_URL"
+          ```
+
+          If `NTFY_URL` is empty, do not attempt a request and tell the user that ntfy is not configured. Do not send notifications for ordinary tasks unless the user asked for one. Do not claim that a notification was sent unless the curl command succeeds.
+          SKILL
+          chmod 600 "$HOME/.config/opencode/skills/ntfy-notifications/SKILL.md"
+      - name: Enable OpenCode automatic permissions
+        run: |
+          set -euo pipefail
+          cat > opencode.json <<'JSON'
+          {
+            "$schema": "https://opencode.ai/config.json",
+            "permission": "allow"
+          }
+          JSON
+      - name: Start OpenCode on Tailscale
+        env:
+          NTFY_URL: ${{ secrets.NTFY_URL }}
+        run: |
+          set -euo pipefail
+          OPENCODE_PASSWORD="$(openssl rand -hex 24)"
+          OPENCODE_SERVER_PASSWORD="$OPENCODE_PASSWORD"
+          export OPENCODE_SERVER_PASSWORD
+          printf '%s' "$OPENCODE_PASSWORD" > /tmp/opencode-password
+          chmod 600 /tmp/opencode-password
+          nohup opencode web --hostname 0.0.0.0 --port 4096 >/tmp/opencode-web.log 2>&1 &
+          echo $! >/tmp/opencode-web.pid
+          for _ in {1..30}; do
+            if curl -fsS -u "opencode:$OPENCODE_SERVER_PASSWORD" http://127.0.0.1:4096/ >/dev/null 2>&1; then break; fi
+            sleep 2
+          done
+          if ! curl -fsS -u "opencode:$OPENCODE_SERVER_PASSWORD" http://127.0.0.1:4096/ >/dev/null; then
+            echo 'OpenCode failed to start. Log output:'
+            cat /tmp/opencode-web.log || true
+            exit 1
+          fi
+          echo "========================================"
+          echo "OpenCode Tailscale service: http://127.0.0.1:4096"
+          echo "OpenCode username: opencode"
+          echo "========================================"
+      - name: Configure OpenSSH
+        env:
+          SSH_PUBLIC_KEY: ${{ secrets.SSH_PUBLIC_KEY }}
+          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+        run: |
+          set -euo pipefail
+          sudo install -d -m 700 -o runner -g runner /home/runner/.ssh
+          printf '%s\n' "$SSH_PUBLIC_KEY" | sudo tee /home/runner/.ssh/authorized_keys >/dev/null
+          sudo chown runner:runner /home/runner/.ssh/authorized_keys
+          sudo chmod 600 /home/runner/.ssh/authorized_keys
+          printf 'runner:%s\n' "$SSH_PASSWORD" | sudo chpasswd
+          printf '%s\n' 'PasswordAuthentication yes' | sudo tee /etc/ssh/sshd_config.d/runner-password.conf >/dev/null
+          printf '%s\n' 'PubkeyAuthentication yes' | sudo tee -a /etc/ssh/sshd_config.d/runner-password.conf >/dev/null
+          sudo install -d -m 0755 /run/sshd
+          sudo sshd -t
+          sudo systemctl enable --now ssh
+          sudo systemctl restart ssh
+      - name: Install Tailscale
+        run: curl -fsSL https://tailscale.com/install.sh | sh
+      - name: Connect to Tailscale
+        env:
+          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+        run: |
+          set -euo pipefail
+          sudo tailscale up --authkey="$TAILSCALE_AUTH_KEY" --hostname="gh-ubuntu-${GITHUB_RUN_ID}"
+          IP="$(tailscale ip -4 | head -n1)"
+          echo "TAILSCALE_IP=$IP" >> "$GITHUB_ENV"
+          echo "SSH_COMMAND=ssh runner@$IP" >> "$GITHUB_ENV"
+          echo "OPENCODE_TAILSCALE_URL=http://$IP:4096" >> "$GITHUB_ENV"
+          echo "========================================"
+          echo "TAILSCALE_IP=$IP"
+          echo "SSH_COMMAND=ssh runner@$IP"
+          echo "OPENCODE_TAILSCALE_URL=http://$IP:4096"
+          echo "========================================"
+      - name: Publish runner connection status
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REVBS_BACKUP_KEY: ${{ secrets.REVBS_BACKUP_KEY }}
+        run: |
+          set -euo pipefail
+          OPENCODE_PASSWORD_ENC="$(openssl enc -aes-256-cbc -pbkdf2 -iter 100000 -pass pass:"$REVBS_BACKUP_KEY" -in /tmp/opencode-password | base64 -w 0)"
+          STATUS="RUN_ID=$GITHUB_RUN_ID\nTAILSCALE_IP=$TAILSCALE_IP\nSSH_COMMAND=ssh runner@$TAILSCALE_IP\nOPENCODE_TAILSCALE_URL=$OPENCODE_TAILSCALE_URL\nOPENCODE_PASSWORD_ENC=$OPENCODE_PASSWORD_ENC\nSTATUS=ready\n"
+          CONTENT="$(printf '%b' "$STATUS" | base64 -w 0)"
+          curl -fsSL -X PUT \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/contents/.github/runner-status/$GITHUB_RUN_ID.txt" \
+            -d "{\"message\":\"Publish runner connection status\",\"content\":\"$CONTENT\"}"
+      - name: Show runner status
+        run: |
+          set -e
+          echo "Runner: $(whoami)"
+          echo "Hostname: $(hostname)"
+          echo "SSH service:"
+          sudo systemctl --no-pager --full status ssh || true
+          echo "Listening ports:"
+          ss -lnt
+      - name: Keep SSH runner alive
+        run: |
+          set -euo pipefail
+          trap 'exit 0' TERM INT
+          while true; do
+            echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] SSH runner alive at $TAILSCALE_IP"
+            sleep 300
+          done

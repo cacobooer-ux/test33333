@@ -83,6 +83,7 @@ jobs:
       - name: Configure OpenCode and Zen key routing
         env:
           OPENCODE_ZEN_API_KEYS_JSON: ${{ secrets.OPENCODE_ZEN_API_KEYS }}
+          REVPS_OPENCODE_MODEL: ${{ vars.REVPS_OPENCODE_MODEL }}
         run: |
           set -euo pipefail
           if [[ -n "$OPENCODE_ZEN_API_KEYS_JSON" ]]; then
@@ -106,8 +107,9 @@ jobs:
           from pathlib import Path
           config = {"$schema": "https://opencode.ai/config.json", "permission": "allow"}
           if os.environ.get("OPENCODE_ZEN_API_KEYS_JSON"):
-              config["model"] = "opencode/qwen3.8-flash"
-              config["providers"] = {"opencode": {"settings": {"baseURL": "http://127.0.0.1:4097"}}}
+              model = os.environ.get("REVPS_OPENCODE_MODEL") or "deepseek-v4.1-flash-free"
+              config["model"] = f"opencode/{model}"
+              config["provider"] = {"opencode": {"options": {"baseURL": "http://127.0.0.1:4097", "apiKey": "revps-local-zen-proxy"}}}
           payload = json.dumps(config, indent=2) + "\n"
           for target in (Path.home() / ".config/opencode/opencode.json", Path(os.environ["GITHUB_WORKSPACE"]) / "opencode.json"):
               target.parent.mkdir(parents=True, exist_ok=True)
@@ -151,6 +153,7 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_ALLOWED_USER_ID: ${{ secrets.TELEGRAM_ALLOWED_USER_ID }}
           OPENCODE_ZEN_API_KEYS_JSON: ${{ secrets.OPENCODE_ZEN_API_KEYS }}
+          REVPS_OPENCODE_MODEL: ${{ vars.REVPS_OPENCODE_MODEL }}
         run: |
           set -euo pipefail
           if [[ -z "$TELEGRAM_BOT_TOKEN" ]]; then
@@ -174,7 +177,7 @@ jobs:
             OPENCODE_SERVER_PASSWORD="$OPENCODE_SERVER_PASSWORD" \
             OPENCODE_API_URL=http://127.0.0.1:4096 \
             OPENCODE_MODEL_PROVIDER=opencode \
-            OPENCODE_MODEL_ID=qwen3.8-flash \
+            OPENCODE_MODEL_ID="${REVPS_OPENCODE_MODEL:-deepseek-v4.1-flash-free}" \
             OPENCODE_AUTO_RESTART_ENABLED=true \
             BOT_LOCALE=ar \
             opencode-telegram start >/tmp/revps-telegram-bot.log 2>&1 </dev/null &

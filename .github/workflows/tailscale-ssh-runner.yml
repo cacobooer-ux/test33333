@@ -36,13 +36,19 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         run: |
           set -euo pipefail
-          sudo chown -R runner:runner "$HOME/.npm" 2>/dev/null || true
           mkdir -p "$HOME/.npm"
           chmod 700 "$HOME/.npm"
-          npm i -g opencode-ai
+          npm install --global @opencode/cli@2.2.6
+          NPM_GLOBAL_BIN="$(npm prefix --global)/bin"
+          if ! command -v opencode >/dev/null 2>&1; then
+            export PATH="$NPM_GLOBAL_BIN:$PATH"
+          fi
+          grep -Fqx "export PATH=\"$NPM_GLOBAL_BIN:\$PATH\"" "$HOME/.bashrc" 2>/dev/null || printf 'export PATH="%s:$PATH"\n' "$NPM_GLOBAL_BIN" >> "$HOME/.bashrc"
+          grep -Fqx "export PATH=\"$NPM_GLOBAL_BIN:\$PATH\"" "$HOME/.profile" 2>/dev/null || printf 'export PATH="%s:$PATH"\n' "$NPM_GLOBAL_BIN" >> "$HOME/.profile"
           if [[ -n "$TELEGRAM_BOT_TOKEN" ]]; then
             npm i -g @grinev/opencode-telegram-bot@0.27.0
           fi
+          command -v opencode
           opencode --version
 
       - name: Install ntfy notification skill
@@ -100,6 +106,7 @@ jobs:
           from pathlib import Path
           config = {"$schema": "https://opencode.ai/config.json", "permission": "allow"}
           if os.environ.get("OPENCODE_ZEN_API_KEYS_JSON"):
+              config["model"] = "opencode/qwen3.8-flash"
               config["providers"] = {"opencode": {"settings": {"baseURL": "http://127.0.0.1:4097"}}}
           payload = json.dumps(config, indent=2) + "\n"
           for target in (Path.home() / ".config/opencode/opencode.json", Path(os.environ["GITHUB_WORKSPACE"]) / "opencode.json"):
@@ -154,14 +161,17 @@ jobs:
           if [[ -n "$OPENCODE_ZEN_API_KEYS_JSON" ]]; then
             export OPENCODE_API_KEY=revps-local-zen-proxy
           fi
-          nohup opencode serve --hostname 127.0.0.1 --port 4096 >/tmp/revps-opencode-server.log 2>&1 </dev/null &
+          OPENCODE_SERVER_PASSWORD="$(openssl rand -hex 32)"
+          nohup env OPENCODE_SERVER_PASSWORD="$OPENCODE_SERVER_PASSWORD" opencode serve --hostname 127.0.0.1 --port 4096 >/tmp/revps-opencode-server.log 2>&1 </dev/null &
           SERVER_PID=$!
           sleep 5
           kill -0 "$SERVER_PID" || { echo 'OpenCode server failed to start; logs are kept private.' >&2; exit 1; }
           nohup env \
             TELEGRAM_BOT_TOKEN="$TELEGRAM_BOT_TOKEN" \
             TELEGRAM_ALLOWED_USER_ID="$TELEGRAM_ALLOWED_USER_ID" \
-            OPENCODE_SERVER_VERSION=v1 \
+            OPENCODE_SERVER_VERSION=v2 \
+            OPENCODE_SERVER_MODE=standalone \
+            OPENCODE_SERVER_PASSWORD="$OPENCODE_SERVER_PASSWORD" \
             OPENCODE_API_URL=http://127.0.0.1:4096 \
             OPENCODE_MODEL_PROVIDER=opencode \
             OPENCODE_MODEL_ID=qwen3.8-flash \

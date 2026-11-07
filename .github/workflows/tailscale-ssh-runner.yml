@@ -32,8 +32,6 @@ jobs:
           node-version: '22.14.0'
       - name: Install OpenCode
         id: install_opencode
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         run: |
           set -euo pipefail
           mkdir -p "$HOME/.npm"
@@ -45,77 +43,8 @@ jobs:
           sudo ln -sf "$NPM_GLOBAL_BIN/opencode" /usr/local/bin/opencode
           grep -Fqx "export PATH=\"$NPM_GLOBAL_BIN:\$PATH\"" "$HOME/.bashrc" 2>/dev/null || printf 'export PATH="%s:$PATH"\n' "$NPM_GLOBAL_BIN" >> "$HOME/.bashrc"
           grep -Fqx "export PATH=\"$NPM_GLOBAL_BIN:\$PATH\"" "$HOME/.profile" 2>/dev/null || printf 'export PATH="%s:$PATH"\n' "$NPM_GLOBAL_BIN" >> "$HOME/.profile"
-          if [[ -n "$TELEGRAM_BOT_TOKEN" ]]; then
-            npm i -g @grinev/opencode-telegram-bot@0.27.0
-          fi
           command -v opencode
           opencode --version
-
-      - name: Install ntfy notification skill
-        run: |
-          set -euo pipefail
-          mkdir -p "$HOME/.config/opencode/skills/ntfy-notifications"
-          cat > "$HOME/.config/opencode/skills/ntfy-notifications/SKILL.md" <<'SKILL'
-          ---
-          name: ntfy-notifications
-          description: Send a completion notification through ntfy when the user explicitly asks to be notified after finishing work.
-          ---
-
-          # ntfy completion notifications
-
-          Use this skill only when the user explicitly requests a completion notification, including wording such as "notify me when you finish", "notify me when you're done", "send me a notification when finished", or equivalent wording.
-
-          The ntfy topic URL is provided in the `NTFY_URL` environment variable. Never reveal, print, commit, or include this URL in normal responses, logs, code, or status output.
-
-          When the requested work is genuinely complete, send one concise notification with:
-
-          ```bash
-          curl --fail --silent --show-error --max-time 20 \\
-            -H 'Title: OpenCode task finished' \\
-            -H 'Tags: white_check_mark' \\
-            --data-raw 'OpenCode finished the requested task.' \\
-            "$NTFY_URL"
-          ```
-
-          If `NTFY_URL` is empty, do not attempt a request and tell the user that ntfy is not configured. Do not send notifications for ordinary tasks unless the user asked for one. Do not claim that a notification was sent unless the curl command succeeds.
-          SKILL
-          chmod 600 "$HOME/.config/opencode/skills/ntfy-notifications/SKILL.md"
-      - name: Configure OpenCode and Zen key routing
-        env:
-          OPENCODE_ZEN_API_KEYS_JSON: ${{ secrets.OPENCODE_ZEN_API_KEYS }}
-          REVPS_OPENCODE_MODEL: ${{ vars.REVPS_OPENCODE_MODEL }}
-        run: |
-          set -euo pipefail
-          if [[ -n "$OPENCODE_ZEN_API_KEYS_JSON" ]]; then
-            curl -fsSL "https://gist.githubusercontent.com/cacobooer-ux/775b99e237acfbc2c35145b978473ef7/raw/zen-key-proxy.mjs?cb=$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" -o "$RUNNER_TEMP/zen-key-proxy.mjs"
-            node --check "$RUNNER_TEMP/zen-key-proxy.mjs"
-            nohup env ZEN_API_KEYS_JSON="$OPENCODE_ZEN_API_KEYS_JSON" PORT=4097 node "$RUNNER_TEMP/zen-key-proxy.mjs" >/tmp/revps-zen-proxy.log 2>&1 </dev/null &
-            PROXY_PID=$!
-            for _ in {1..20}; do
-              if curl -fsS http://127.0.0.1:4097/health -o "$RUNNER_TEMP/zen-health.json"; then break; fi
-              sleep 1
-            done
-            kill -0 "$PROXY_PID"
-            KEY_COUNT="$(node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(String(JSON.parse(s).keyCount)))' < "$RUNNER_TEMP/zen-health.json")"
-            echo "OpenCode Zen key proxy ready ($KEY_COUNT key(s); values hidden)."
-            printf '%s\n' 'export OPENCODE_API_KEY=revps-local-zen-proxy' >> "$HOME/.bashrc"
-          else
-            echo 'OpenCode Zen key proxy is not configured.'
-          fi
-          python3 - <<'PY'
-          import json, os
-          from pathlib import Path
-          config = {"$schema": "https://opencode.ai/config.json", "permission": "allow"}
-          if os.environ.get("OPENCODE_ZEN_API_KEYS_JSON"):
-              model = os.environ.get("REVPS_OPENCODE_MODEL") or "deepseek-v4.1-flash-free"
-              config["model"] = f"opencode/{model}"
-              config["provider"] = {"opencode": {"options": {"baseURL": "http://127.0.0.1:4097", "apiKey": "revps-local-zen-proxy"}}}
-          payload = json.dumps(config, indent=2) + "\n"
-          for target in (Path.home() / ".config/opencode/opencode.json", Path(os.environ["GITHUB_WORKSPACE"]) / "opencode.json"):
-              target.parent.mkdir(parents=True, exist_ok=True)
-              target.write_text(payload)
-              target.chmod(0o600)
-          PY
       - name: Configure OpenSSH
         env:
           SSH_PUBLIC_KEY: ${{ secrets.SSH_PUBLIC_KEY }}
@@ -148,43 +77,6 @@ jobs:
           echo "TAILSCALE_IP=$IP"
           echo "SSH_COMMAND=ssh runner@$IP"
           echo "========================================"
-      - name: Start OpenCode Telegram bot
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_ALLOWED_USER_ID: ${{ secrets.TELEGRAM_ALLOWED_USER_ID }}
-          OPENCODE_ZEN_API_KEYS_JSON: ${{ secrets.OPENCODE_ZEN_API_KEYS }}
-          REVPS_OPENCODE_MODEL: ${{ vars.REVPS_OPENCODE_MODEL }}
-        run: |
-          set -euo pipefail
-          if [[ -z "$TELEGRAM_BOT_TOKEN" ]]; then
-            echo 'Telegram integration is not configured; SSH access remains available.'
-            exit 0
-          fi
-          [[ "$TELEGRAM_ALLOWED_USER_ID" =~ ^[1-9][0-9]*$ ]] || { echo 'Telegram user ID secret is invalid.' >&2; exit 1; }
-          if [[ -n "$OPENCODE_ZEN_API_KEYS_JSON" ]]; then
-            export OPENCODE_API_KEY=revps-local-zen-proxy
-          fi
-          OPENCODE_SERVER_PASSWORD="$(openssl rand -hex 32)"
-          nohup env OPENCODE_SERVER_PASSWORD="$OPENCODE_SERVER_PASSWORD" opencode serve --hostname 127.0.0.1 --port 4096 >/tmp/revps-opencode-server.log 2>&1 </dev/null &
-          SERVER_PID=$!
-          sleep 5
-          kill -0 "$SERVER_PID" || { echo 'OpenCode server failed to start; logs are kept private.' >&2; exit 1; }
-          nohup env \
-            TELEGRAM_BOT_TOKEN="$TELEGRAM_BOT_TOKEN" \
-            TELEGRAM_ALLOWED_USER_ID="$TELEGRAM_ALLOWED_USER_ID" \
-            OPENCODE_SERVER_VERSION=v2 \
-            OPENCODE_SERVER_MODE=standalone \
-            OPENCODE_SERVER_PASSWORD="$OPENCODE_SERVER_PASSWORD" \
-            OPENCODE_API_URL=http://127.0.0.1:4096 \
-            OPENCODE_MODEL_PROVIDER=opencode \
-            OPENCODE_MODEL_ID="${REVPS_OPENCODE_MODEL:-deepseek-v4.1-flash-free}" \
-            OPENCODE_AUTO_RESTART_ENABLED=true \
-            BOT_LOCALE=ar \
-            opencode-telegram start >/tmp/revps-telegram-bot.log 2>&1 </dev/null &
-          BOT_PID=$!
-          sleep 5
-          kill -0 "$BOT_PID" || { echo 'Telegram bot failed to start; logs are kept private.' >&2; exit 1; }
-          echo 'OpenCode Telegram bot started for the configured Telegram user.'
       - name: Publish runner connection status
         env:
           GH_TOKEN: ${{ github.token }}

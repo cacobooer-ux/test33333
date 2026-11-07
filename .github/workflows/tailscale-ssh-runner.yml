@@ -38,11 +38,11 @@ jobs:
           set -euo pipefail
           mkdir -p "$HOME/.npm"
           chmod 700 "$HOME/.npm"
-          npm install --global @opencode/cli@2.2.6
+          npm install --global opencode-ai@1.18.27
           NPM_GLOBAL_BIN="$(npm prefix --global)/bin"
-          if ! command -v opencode >/dev/null 2>&1; then
-            export PATH="$NPM_GLOBAL_BIN:$PATH"
-          fi
+          export PATH="$NPM_GLOBAL_BIN:$PATH"
+          [[ -x "$NPM_GLOBAL_BIN/opencode" ]] || { echo 'OpenCode CLI binary was not installed.' >&2; exit 1; }
+          sudo ln -sf "$NPM_GLOBAL_BIN/opencode" /usr/local/bin/opencode
           grep -Fqx "export PATH=\"$NPM_GLOBAL_BIN:\$PATH\"" "$HOME/.bashrc" 2>/dev/null || printf 'export PATH="%s:$PATH"\n' "$NPM_GLOBAL_BIN" >> "$HOME/.bashrc"
           grep -Fqx "export PATH=\"$NPM_GLOBAL_BIN:\$PATH\"" "$HOME/.profile" 2>/dev/null || printf 'export PATH="%s:$PATH"\n' "$NPM_GLOBAL_BIN" >> "$HOME/.profile"
           if [[ -n "$TELEGRAM_BOT_TOKEN" ]]; then

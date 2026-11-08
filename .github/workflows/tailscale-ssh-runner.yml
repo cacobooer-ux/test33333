@@ -33,7 +33,6 @@ jobs:
       - name: Install OpenCode
         id: install_opencode
         env:
-          OPENCODE_CONSOLE_API_KEY: ${{ secrets.OPENCODE_CONSOLE_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_ALLOWED_USER_ID: ${{ secrets.TELEGRAM_ALLOWED_USER_ID }}
         run: |
@@ -49,10 +48,6 @@ jobs:
           grep -Fqx "export PATH=\"$NPM_GLOBAL_BIN:\$PATH\"" "$HOME/.profile" 2>/dev/null || printf 'export PATH="%s:$PATH"\n' "$NPM_GLOBAL_BIN" >> "$HOME/.profile"
           command -v opencode
           opencode --version
-          if [[ -n "$OPENCODE_CONSOLE_API_KEY" ]]; then
-            opencode auth login opencode --method key --answer "key=$OPENCODE_CONSOLE_API_KEY"
-            echo 'OpenCode Console API authenticated.'
-          fi
           if [[ -n "$TELEGRAM_BOT_TOKEN" ]]; then
             export OPENCODE_SERVER_PASSWORD="$(openssl rand -hex 32)"
             echo "OPENCODE_SERVER_PASSWORD=$OPENCODE_SERVER_PASSWORD" >> "$GITHUB_ENV"
